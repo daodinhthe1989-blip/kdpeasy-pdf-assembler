@@ -1,0 +1,274 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>KDPEasy PDF Assembler</title>
+<meta name="description" content="Turn a stack of page images into one KDP-ready PDF — right size, right bleed, right gutter.">
+<link rel="stylesheet" href="styles.css">
+</head>
+<body>
+
+<header class="app-header">
+  <div class="wordmark">
+    <span class="wm-1">KDPEasy</span> <span class="wm-2">PDF Assembler</span>
+  </div>
+  <div class="privacy-pill">
+    <svg viewBox="0 0 24 24" width="14" height="14" aria-hidden="true" focusable="false">
+      <path d="M7 10V7a5 5 0 0 1 10 0v3" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
+      <rect x="4.5" y="10" width="15" height="10.5" rx="2.5" fill="none" stroke="currentColor" stroke-width="2"/>
+      <circle cx="12" cy="15.2" r="1.4" fill="currentColor"/>
+    </svg>
+    <span>Your images never leave your computer.</span>
+  </div>
+</header>
+
+<p class="intro">Turn a stack of page images into one KDP-ready PDF — right size, right bleed, right gutter.</p>
+
+<main class="layout">
+
+  <!-- ============================= SIDEBAR ============================= -->
+  <aside class="sidebar">
+
+    <div id="bannerHost" class="banner-host" aria-live="polite"></div>
+
+    <!-- STEP 1 ------------------------------------------------------- -->
+    <section class="step" id="step1">
+      <div class="step-head">
+        <span class="badge">1</span>
+        <h2 class="step-label">Choose your book's size and bleed</h2>
+        <button type="button" class="help-btn" id="help1" aria-expanded="false" aria-label="About book size">?</button>
+        <div class="popover" id="pop1" role="dialog" aria-label="About book size" hidden>
+          This is the finished size of your printed book, chosen when you set up your paperback on
+          KDP. If you're not sure, 8.5 × 11 is the most common size for coloring books.
+        </div>
+      </div>
+      <div class="step-body">
+        <label class="sr-only" for="trimSelect">Trim size</label>
+        <select id="trimSelect" class="control">
+          <option value="" disabled selected>Choose a trim size…</option>
+        </select>
+
+        <div class="field">
+          <div class="seg" role="group" aria-label="Bleed">
+            <button type="button" class="seg-btn is-on" id="bleedOff" aria-pressed="true">No bleed</button>
+            <button type="button" class="seg-btn" id="bleedOn" aria-pressed="false">Full bleed</button>
+          </div>
+          <p class="hint" id="bleedHint">Your artwork sits inside the page with white space around it. This is what most coloring books use.</p>
+          <p class="chip" id="targetHint" hidden></p>
+        </div>
+
+        <div class="field">
+          <label class="field-label" for="pageCount">How many pages will this book have?</label>
+          <input type="number" id="pageCount" class="control control-num" min="1" max="2000" step="1" inputmode="numeric" placeholder="0">
+          <p class="hint" id="pageCountHint">We'll count your uploaded pages until you type a number.</p>
+          <p class="note-warn" id="pageCountWarn" hidden></p>
+        </div>
+
+        <div class="field">
+          <label class="check check-top">
+            <input type="checkbox" id="gutterToggle" checked>
+            <span>
+              <strong>Add inside (gutter) margin</strong>
+              <span class="check-sub" id="gutterReadout">0.375″ per KDP's table for up to 150 pages</span>
+            </span>
+          </label>
+          <p class="hint">Books need extra space near the spine so the binding doesn't swallow your content. We reserve it automatically whenever a page needs resizing. Pages that are already the right size keep whatever margin they were made with — we can't add gutter to those after the fact.</p>
+        </div>
+
+        <details class="info-panel" id="parityPanel">
+          <summary>Left and right pages</summary>
+          <div class="info-body">
+            <label class="field-label" for="firstPage">My first uploaded page is page number</label>
+            <input type="number" id="firstPage" class="control control-num" min="1" max="2000" step="1" value="1" inputmode="numeric">
+            <p class="hint">Odd pages sit on the right of an open book (spine on their left), even pages on the left. Leave this at 1 unless your uploads start mid-book.</p>
+          </div>
+        </details>
+      </div>
+    </section>
+
+    <!-- STEP 2 ------------------------------------------------------- -->
+    <section class="step locked" id="step2">
+      <div class="step-head">
+        <span class="badge">2</span>
+        <h2 class="step-label">Upload your pages</h2>
+      </div>
+      <div class="step-body">
+        <button type="button" class="btn btn-secondary" id="chooseBtn">Choose images</button>
+        <input type="file" id="fileInput" accept="image/png,image/jpeg" multiple hidden>
+        <p class="hint">PNG or JPG, any sizes, as many as you like. Drag them in, click to browse, or paste with Ctrl+V.</p>
+        <div class="summary" id="uploadSummary" hidden>
+          <p id="uploadSummaryText"></p>
+          <button type="button" class="link-btn" id="clearAllBtn">Remove all</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 3 ------------------------------------------------------- -->
+    <section class="step locked" id="step3">
+      <div class="step-head">
+        <span class="badge">3</span>
+        <h2 class="step-label">Pages that need resizing</h2>
+        <button type="button" class="help-btn" id="help3" aria-expanded="false" aria-label="About resizing">?</button>
+        <div class="popover" id="pop3" role="dialog" aria-label="About resizing" hidden>
+          Pages that are already exactly the right size are used as they are. Everything else has
+          to be scaled to fit your book — this decides how. You can change it for a single page
+          from its preview.
+        </div>
+      </div>
+      <div class="step-body">
+        <p class="note-ok" id="allMatchNote" hidden>All your pages are already the right size — nothing to set here.</p>
+
+        <div class="seg" role="group" aria-label="Placement">
+          <button type="button" class="seg-btn is-on" id="placeFit" aria-pressed="true">Fit</button>
+          <button type="button" class="seg-btn" id="placeFill" aria-pressed="false">Fill</button>
+        </div>
+        <p class="hint" id="placementHint"></p>
+        <p class="note-warn" id="cropSummary" hidden></p>
+
+        <div class="field">
+          <label class="field-label" for="fillSelect">Fill the space around your artwork</label>
+          <select id="fillSelect" class="control">
+            <option value="auto">Auto — pick for me (recommended)</option>
+            <option value="white">White</option>
+            <option value="solid">Solid color</option>
+            <option value="blur">Blurred background</option>
+          </select>
+          <div class="solid-color-row" id="solidColorRow" hidden>
+            <button type="button" class="btn-swatch" id="colorSwatchBtn">
+              <span class="swatch swatch-lg" id="colorSwatchPreview"></span>
+              <span id="colorSwatchLabel">Pick color</span>
+            </button>
+            <button type="button" class="link-btn" id="colorResetBtn" hidden>Reset to auto-detected</button>
+            <input type="color" id="colorFallbackInput" hidden aria-label="Pick a solid color">
+          </div>
+          <p class="hint" id="fillHint">Looks at the edge of each image and chooses White, Solid, or Blur.</p>
+        </div>
+      </div>
+    </section>
+
+    <!-- STEP 4 ------------------------------------------------------- -->
+    <section class="step locked" id="step4">
+      <div class="step-head">
+        <span class="badge">4</span>
+        <h2 class="step-label">Image format for resized pages</h2>
+      </div>
+      <div class="step-body">
+        <p class="hint" id="formatIntro">Your download is always one PDF file — this only affects how resized pages are compressed inside it.</p>
+        <div class="seg" role="group" aria-label="Format for resized pages">
+          <button type="button" class="seg-btn is-on" id="fmtPng" aria-pressed="true">PNG</button>
+          <button type="button" class="seg-btn" id="fmtJpg" aria-pressed="false">JPG</button>
+        </div>
+        <p class="hint" id="formatHint">Sharpest quality, best for line art. Files are larger.</p>
+        <div class="field" id="qualityField" hidden>
+          <label class="field-label" for="jpegQuality">JPG quality: <span id="jpegQualityVal">92%</span></label>
+          <input type="range" id="jpegQuality" min="70" max="100" step="1" value="92">
+        </div>
+        <p class="hint">Pages that are already the right size keep their original format.</p>
+      </div>
+    </section>
+
+    <div class="sidebar-foot">
+      <div class="size-meter" id="sizeMeter">
+        <div class="size-row">
+          <span class="size-label">Est. size</span>
+          <span class="size-val" id="sizeVal">0 MB / 650 MB</span>
+        </div>
+        <div class="size-bar"><div class="size-fill" id="sizeFill"></div></div>
+        <p class="size-copy" id="sizeCopy">KDP won't accept a file over 650 MB. We'll warn you here before you find out the hard way.</p>
+      </div>
+      <button type="button" class="btn btn-primary" id="downloadBtn" disabled>
+        <span>Download PDF</span>
+      </button>
+    </div>
+
+  </aside>
+
+  <!-- ============================= CONTENT ============================= -->
+  <section class="content" id="content">
+
+    <div class="panel pages-panel">
+      <div class="panel-head">
+        <h2 class="panel-title">Your pages <span class="count" id="pageTotal"></span></h2>
+        <p class="panel-hint" id="reorderHint" hidden>Drag to reorder · Alt + ←/→ moves the selected page</p>
+      </div>
+
+      <!-- empty state / drop zone -->
+      <div class="empty" id="emptyState" tabindex="0" role="button" aria-label="Drop your page images here, or press Enter to browse">
+        <svg viewBox="0 0 48 48" width="44" height="44" aria-hidden="true" focusable="false">
+          <rect x="10" y="6" width="26" height="34" rx="2.5" fill="none" stroke="currentColor" stroke-width="2.5"/>
+          <path d="M14 10h26v32H14" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linejoin="round" opacity=".55"/>
+          <path d="M17 30l5-5 4 4 3-3 4 4" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+        </svg>
+        <p class="empty-head" id="emptyHead">Choose your book size first</p>
+        <p class="empty-sub" id="emptySub">Then drop your page images here — PNG or JPG, as many as you like.</p>
+        <p class="empty-muted">Your images never leave your computer.</p>
+      </div>
+
+      <ol class="page-grid" id="pageGrid" hidden></ol>
+    </div>
+
+    <div class="panel preview-panel" id="previewPanel" hidden>
+      <div class="toolbar">
+        <div class="seg seg-sm" role="group" aria-label="Before / After" id="cmpButtons">
+          <button type="button" class="seg-btn" id="btnBefore" aria-pressed="false">Before</button>
+          <button type="button" class="seg-btn" id="btnAfter" aria-pressed="false">After</button>
+        </div>
+        <p class="toolbar-title" id="previewTitle"></p>
+        <label class="check">
+          <input type="checkbox" id="guidesToggle" checked>
+          <span>Show guides</span>
+        </label>
+      </div>
+
+      <div class="stage" id="stage">
+        <div class="compare" id="compare">
+          <div class="layer layer-before">
+            <canvas id="beforeCanvas"></canvas>
+          </div>
+          <div class="layer layer-after" id="layerAfter">
+            <div class="sheet" id="sheet">
+              <canvas id="previewCanvas"></canvas>
+              <canvas id="overlayCanvas" class="overlay"></canvas>
+            </div>
+          </div>
+          <span class="cmp-label cmp-left">BEFORE</span>
+          <span class="cmp-label cmp-right">AFTER</span>
+          <div class="divider" id="divider">
+            <div class="handle" id="handle" role="slider" tabindex="0"
+                 aria-label="Compare before and after" aria-valuemin="0" aria-valuemax="100" aria-valuenow="50">⟷</div>
+          </div>
+        </div>
+        <div class="stage-loading" id="stageLoading" hidden><span class="spinner spinner-dark" aria-hidden="true"></span> Loading page…</div>
+        <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+      </div>
+
+      <div class="readout" id="readout" aria-live="polite">
+        <p class="readout-main" id="outMain"></p>
+        <p class="readout-sub" id="outSub"></p>
+        <p class="readout-sub" id="outSub2"></p>
+        <p class="note-warn" id="pageCropWarn" hidden></p>
+        <p class="note-warn" id="pageGutterNote" hidden></p>
+        <div class="override-row" id="overrideRow">
+          <label class="field-label" for="overrideSelect">This page</label>
+          <select id="overrideSelect" class="control control-sm"></select>
+        </div>
+        <div class="quality" id="quality" hidden>
+          <p class="q-title" id="qTitle"></p>
+          <p class="q-copy" id="qCopy"></p>
+        </div>
+      </div>
+    </div>
+
+  </section>
+</main>
+
+<footer class="app-footer">
+  <p>All processing happens in your browser. Your images never leave your computer.</p>
+  <p>Sizes, bleed and gutter margins follow Amazon KDP's official paperback guidelines.</p>
+</footer>
+
+<script src="pdf.js"></script>
+<script src="app.js"></script>
+</body>
+</html>
