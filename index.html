@@ -144,6 +144,17 @@
           </div>
           <p class="hint" id="fillHint">Looks at the edge of each image and chooses White, Solid, or Blur.</p>
         </div>
+
+        <div class="field">
+          <label class="check check-top">
+            <input type="checkbox" id="sharpenToggle" checked>
+            <span>
+              <strong>Sharpen black-and-white line art</strong>
+              <span class="check-sub">Crisp lines at 300 DPI when your pictures are smaller than the page</span>
+            </span>
+          </label>
+          <p class="hint">Pictures from an image AI (like ChatGPT) are usually smaller than a 300 DPI page needs, so a plain resize looks soft. For black-and-white line drawings we clean up and sharpen the edges while resizing. It can’t add detail that isn’t in your picture, and color or shaded pictures are left alone. Pages marked ✨ in your list were sharpened. Turn it off for a plain resize.</p>
+        </div>
       </div>
     </section>
 
@@ -215,6 +226,7 @@
           <button type="button" class="seg-btn" id="btnAfter" aria-pressed="false">After</button>
         </div>
         <p class="toolbar-title" id="previewTitle"></p>
+        <button type="button" class="link-btn" id="zoomBtn" hidden>View at 100%</button>
         <label class="check">
           <input type="checkbox" id="guidesToggle" checked>
           <span>Show guides</span>
@@ -240,6 +252,7 @@
           </div>
         </div>
         <div class="stage-loading" id="stageLoading" hidden><span class="spinner spinner-dark" aria-hidden="true"></span> Loading page…</div>
+        <div class="stage-note" id="stageNote" hidden><span class="spinner spinner-dark" aria-hidden="true"></span> Sharpening preview…</div>
         <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
       </div>
 
@@ -262,6 +275,26 @@
 
   </section>
 </main>
+
+<div class="zoom-modal" id="zoomModal" role="dialog" aria-modal="true" aria-label="Page at print size" hidden>
+  <div class="zoom-box">
+    <div class="zoom-bar">
+      <p class="zoom-title" id="zoomTitle"></p>
+      <button type="button" class="btn btn-secondary zoom-close" id="zoomClose">Close</button>
+    </div>
+    <p class="zoom-hint" id="zoomHint"></p>
+    <div class="zoom-panes" id="zoomPanes">
+      <div class="zoom-col" id="zoomColA">
+        <p class="zoom-label" id="zoomLabelA"></p>
+        <div class="zoom-scroll" id="zoomScrollA"></div>
+      </div>
+      <div class="zoom-col" id="zoomColB">
+        <p class="zoom-label" id="zoomLabelB"></p>
+        <div class="zoom-scroll" id="zoomScrollB"></div>
+      </div>
+    </div>
+  </div>
+</div>
 
 <footer class="app-footer">
   <p>All processing happens in your browser. Your images never leave your computer.</p>

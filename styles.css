@@ -958,6 +958,74 @@ input[type="range"] { width: 100%; accent-color: var(--accent); }
 }
 .spinner-dark { border-color: rgba(100,116,139,.3); border-top-color: var(--text-muted); }
 
+/* small, non-blocking note while the sharpened preview is being built */
+.stage-note {
+  position: absolute;
+  left: 50%;
+  bottom: 10px;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 5px 12px;
+  font-size: 12px;
+  color: var(--text-muted);
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  box-shadow: var(--shadow);
+  z-index: 6;
+}
+
+/* ------------------------ 100 % view (print-size) ---------------- */
+
+body.modal-open { overflow: hidden; }
+
+.zoom-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: rgba(15,23,42,.6);
+}
+.zoom-box {
+  display: flex;
+  flex-direction: column;
+  width: min(1400px, 100%);
+  max-height: 100%;
+  padding: 14px 16px 16px;
+  background: var(--surface);
+  border-radius: var(--radius);
+  box-shadow: 0 10px 40px rgba(15,23,42,.35);
+}
+.zoom-bar { display: flex; align-items: center; gap: 12px; }
+.zoom-title { flex: 1 1 auto; margin: 0; font-size: 14px; font-weight: 600; min-width: 0; }
+.zoom-close { width: auto; min-height: 36px; padding: 6px 16px; }
+.zoom-hint { margin: 6px 0 10px; font-size: 12px; color: var(--text-muted); }
+/* minmax(0, 1fr): the 2550-px canvas must not stretch the column */
+.zoom-panes { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 12px; min-height: 0; }
+.zoom-panes.single { grid-template-columns: minmax(0, 1fr); }
+.zoom-col { min-width: 0; }
+.zoom-label { margin: 0 0 6px; font-size: 12px; font-weight: 600; }
+.zoom-scroll {
+  height: min(70vh, 640px);
+  overflow: auto;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: grab;
+}
+.zoom-scroll.dragging { cursor: grabbing; }
+.zoom-scroll canvas { display: block; background: #fff; }
+
+@media (max-width: 760px) {
+  .zoom-panes { grid-template-columns: minmax(0, 1fr); }
+  .zoom-scroll { height: 34vh; }
+}
+
 .override-row {
   display: flex;
   align-items: center;

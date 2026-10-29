@@ -30,6 +30,17 @@
   var PAGE_OVERHEAD_BYTES = 600;           // page + content objects, xref line
   var KDP_MIN_PAGES = 24;
 
+  // Line-art sharpening (see section 5b). Tuned on real ChatGPT pages.
+  var SHARPEN_MIN_SCALE = 1.05;      // only when the art is drawn this much bigger than its pixels
+  var SHARPEN_SIGMA_PER_SCALE = 0.37; // blur radius (output px) per unit of upscale, clamped 0.5–1.6
+  var SHARPEN_CURVE_LO = 0.35;       // grays below this become black, above CURVE_HI white
+  var SHARPEN_CURVE_HI = 0.65;
+  var SHARPEN_GOOD_DPI = 100;        // source DPI at/above which we call the result good
+  var SHARPEN_MIN_DPI = 60;          // below this, fine lines are lost — keep the red warning
+  var LINEART_MAX_COLORED = 0.03;    // share of pixels allowed to carry color
+  var LINEART_MAX_MIDGRAY = 0.15;    // share allowed to be mid-gray (anti-aliasing only)
+  var LINEART_MIN_WHITE = 0.35;      // share that must be paper-white
+
   // All 16 official KDP paperback trim sizes, in KDP's own order/groups.
   // COPIED VERBATIM from KDPEasy Margin Fixer's app.js — the two tools must
   // never disagree about what "8.5 x 11" means in pixels. If you edit this
@@ -109,6 +120,7 @@
     customSolidColor: null,
     format: 'png',
     jpegQuality: JPEG_QUALITY,
+    sharpen: true,           // clean up + sharpen black-and-white line art when it is scaled up
     items: [],
     nextId: 1,
     selectedId: null,
@@ -128,6 +140,7 @@
    *   embed      how an as-is page is embedded: 'jpeg' (byte-for-byte),
    *              'png' (IDAT pass-through) or 'pixels' (lossless repack)
    *   thumb      small canvas;  analysis  border analysis (Auto fill)
+   *   lineArt    true if the page is black-and-white line art (sharpening candidate)
    *   probe      encoded-size samples for the size estimate
    *   placement  'default' | 'fit' | 'fill'  (per-page override)
    *   el         its card in the page grid
@@ -140,7 +153,9 @@
   var importQueue = [];
   var importing = false;
   var dragId = null;
-  var preview = { id: null, canvas: null, pyramid: null, loading: null };
+  // `full` caches the selected page rendered at full size (sharpened) as a
+  // pyramid, so the preview can show exactly what the export will contain.
+  var preview = { id: null, canvas: null, pyramid: null, loading: null, full: null, fullBusy: null, fullTimer: 0 };
 
   /* -- small helpers -- */
 
@@ -466,6 +481,121 @@
     return a.color;
   }
 
+  /* ---- 5b. LINE-ART SHARPENING ---- */
+
+  // Pictures made by an image AI are usually smaller than a 300-DPI page
+  // needs (ChatGPT's 8.5 x 11 is ~1100 px wide, about 130 DPI), and a plain
+  // upscale leaves the lines soft. For black-and-white line art we upscale,
+  // blur by a fraction of a pixel to smooth the stair-steps, then push the
+  // grays through a steep curve: edges come out crisp and the paper tint
+  // disappears. It cannot add detail that was never in the picture — the
+  // page badge says so.
+
+  // Runs on the downscaled working copy (like analyzeBorder). Cached per page.
+  function detectLineArt(work) {
+    var data;
+    try {
+      data = work.getContext('2d').getImageData(0, 0, work.width, work.height).data;
+    } catch (e) {
+      return false;
+    }
+    var n = data.length / 4, colored = 0, mid = 0, white = 0;
+    for (var i = 0; i < data.length; i += 4) {
+      var r = data[i], g = data[i + 1], b = data[i + 2];
+      if (Math.max(r, g, b) - Math.min(r, g, b) > 24) colored++;
+      var l = (r + g + b) / 3;
+      if (l > 64 && l < 192) mid++;
+      if (l >= 200) white++;
+    }
+    return n > 0 && colored / n < LINEART_MAX_COLORED &&
+           mid / n < LINEART_MAX_MIDGRAY && white / n >= LINEART_MIN_WHITE;
+  }
+
+  // Whether (and where, and how hard) a page gets sharpened when drawn at
+  // render scale `s`. Preview and export both ask this, so they agree.
+  // Returns null when the page is left as a plain resize.
+  function sharpenPlan(item, geo, mode, s) {
+    if (!state.sharpen || mode === 'asis' || !item || !item.lineArt) return null;
+    // A tinted solid border would show next to the pure-white page.
+    if (effectiveFill(item) === 'solid' && solidColor(item) !== '#ffffff') return null;
+    var scale = mode === 'fit' ? geo.fitScale : geo.coverScale;
+    if (!(scale * s >= SHARPEN_MIN_SCALE)) return null;
+    return {
+      rect: mode === 'fit' ? geo.placed : geo.area,
+      sigma: Math.max(0.5, Math.min(1.6, SHARPEN_SIGMA_PER_SCALE * scale * s))
+    };
+  }
+
+  // Separable Gaussian blur of a gray plane (edges repeat the border pixel).
+  function blurGray(src, w, h, sigma) {
+    var r = Math.max(1, Math.ceil(sigma * 2.5)), k = new Float32Array(2 * r + 1), sum = 0, i;
+    for (i = -r; i <= r; i++) { k[i + r] = Math.exp(-(i * i) / (2 * sigma * sigma)); sum += k[i + r]; }
+    for (i = 0; i < k.length; i++) k[i] /= sum;
+
+    var tmp = new Float32Array(w * h), x, y, j, acc, row;
+    for (y = 0; y < h; y++) {
+      row = y * w;
+      for (x = 0; x < w; x++) {
+        acc = 0;
+        for (j = -r; j <= r; j++) {
+          var xx = x + j;
+          xx = xx < 0 ? 0 : (xx >= w ? w - 1 : xx);
+          acc += src[row + xx] * k[j + r];
+        }
+        tmp[row + x] = acc;
+      }
+    }
+
+    // vertical pass, row by row (cache-friendly)
+    var out = new Uint8Array(w * h), line = new Float32Array(w);
+    for (y = 0; y < h; y++) {
+      for (x = 0; x < w; x++) line[x] = 0;
+      for (j = -r; j <= r; j++) {
+        var yy = y + j;
+        yy = yy < 0 ? 0 : (yy >= h ? h - 1 : yy);
+        var kj = k[j + r], off = yy * w;
+        for (x = 0; x < w; x++) line[x] += tmp[off + x] * kj;
+      }
+      row = y * w;
+      for (x = 0; x < w; x++) out[row + x] = line[x] + 0.5;
+    }
+    return out;
+  }
+
+  var sharpenLut = null;
+  function sharpenCurve() {
+    if (sharpenLut) return sharpenLut;
+    sharpenLut = new Uint8Array(256);
+    for (var v = 0; v < 256; v++) {
+      var t = (v / 255 - SHARPEN_CURVE_LO) / (SHARPEN_CURVE_HI - SHARPEN_CURVE_LO);
+      t = t < 0 ? 0 : (t > 1 ? 1 : t);
+      sharpenLut[v] = Math.round(t * t * (3 - 2 * t) * 255);
+    }
+    return sharpenLut;
+  }
+
+  // Sharpens the pixels of `rect` (canvas px, already drawn) in place. The
+  // rect is grown to whole pixels so the anti-aliased rim against the page
+  // border is neutral gray too (the PDF stores an all-gray page as 1 channel).
+  function sharpenRegion(ctx, rect, sigma) {
+    var x0 = Math.max(0, Math.floor(rect.x)), y0 = Math.max(0, Math.floor(rect.y));
+    var x1 = Math.min(ctx.canvas.width, Math.ceil(rect.x + rect.w));
+    var y1 = Math.min(ctx.canvas.height, Math.ceil(rect.y + rect.h));
+    var w = x1 - x0, h = y1 - y0;
+    if (w < 4 || h < 4) return;
+
+    var img = ctx.getImageData(x0, y0, w, h), d = img.data, n = w * h, i;
+    var gray = new Uint8Array(n);
+    for (i = 0; i < n; i++) gray[i] = (d[i * 4] + d[i * 4 + 1] + d[i * 4 + 2]) / 3 + 0.5;
+    var soft = blurGray(gray, w, h, sigma), lut = sharpenCurve();
+    for (i = 0; i < n; i++) {
+      var v = lut[soft[i]];
+      d[i * 4] = d[i * 4 + 1] = d[i * 4 + 2] = v;
+      d[i * 4 + 3] = 255;
+    }
+    ctx.putImageData(img, x0, y0);
+  }
+
   /* ---- 6. BOOK & PAGE GEOMETRY ---- */
 
   function pageItems() {
@@ -704,7 +834,7 @@
   // left so a preview can show only the visible part of the canvas; the
   // export always renders the full canvas (offX = 0). Guides are never
   // drawn here — see drawGuides().
-  function renderPage(ctx, item, pyramid, geo, s, mode, offX) {
+  function renderPage(ctx, item, pyramid, geo, s, mode, offX, noSharpen) {
     var W = geo.fullW * s, H = geo.fullH * s;
     ctx.save();
     ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -744,6 +874,12 @@
       drawArtwork(ctx, pyramid, c.x, c.y, c.w, c.h);
       ctx.restore();
     }
+
+    // Black-and-white line art that is being scaled up: clean up the edges.
+    // (getImageData ignores the translate above, so the rect carries offX.)
+    // `noSharpen` is only for the 100 % view's "plain resize" side.
+    var sp = noSharpen ? null : sharpenPlan(item, geo, mode, s);
+    if (sp) sharpenRegion(ctx, scaleRect(sp.rect, s, offX), sp.sigma);
     ctx.restore();
   }
 
@@ -841,6 +977,7 @@
       work = newCanvas(item.w * ws, item.h * ws);
       whiteCtx(work).drawImage(halfStep(pyramid, work.width), 0, 0, work.width, work.height);
       item.analysis = analyzeBorder(work);
+      item.lineArt = detectLineArt(work);
       item.thumb = shrinkTo(work, THUMB_LONG_EDGE);
       releaseCanvas(work);
       return probeSizes(pyramid, probeScalesFor(item));
@@ -960,10 +1097,25 @@
     var mode = effectiveMode(item, b);
     var geo = computeGeometry(item, spineLeftAt(pageIndex));
     var dpi = Math.round(modeDPI(mode, geo));
-    var st = { mode: mode, geo: geo, dpi: dpi, crop: mode === 'fill' && geo.cropTooMuch };
+    var sharp = sharpenPlan(item, geo, mode, 1);
+    var st = { mode: mode, geo: geo, dpi: dpi, crop: mode === 'fill' && geo.cropTooMuch, sharp: !!sharp };
     if (mode === 'asis') {
       st.cls = 'status-ok'; st.label = '✅ Right size';
       st.title = 'Already the right size — used as-is.';
+    } else if (sharp) {
+      // The page is built at a full 300 DPI either way; the DPI shown is how
+      // much real detail the original had, so say plainly what sharpening can
+      // and cannot do.
+      st.title = 'Black-and-white line art. Your image has about ' + dpi + ' DPI of real detail; ' +
+        'its edges are cleaned up and sharpened while it is resized, and the page is built at 300 DPI. ' +
+        'Sharpening cannot add fine detail that is not in the picture.';
+      if (dpi >= SHARPEN_GOOD_DPI) {
+        st.cls = 'status-ok'; st.label = '✨ Sharpened · ' + dpi + ' DPI';
+      } else if (dpi >= SHARPEN_MIN_DPI) {
+        st.cls = 'status-resize'; st.label = '⚠️ Sharpened · ' + dpi + ' DPI';
+      } else {
+        st.cls = 'status-low'; st.label = '⛔ Low res · ' + dpi + ' DPI';
+      }
     } else if (dpi < 200) {
       st.cls = 'status-low'; st.label = '⛔ Low res · ' + dpi + ' DPI';
       st.title = 'Will be resized using your Fit/Fill choice. At ' + dpi + ' DPI this is likely to look blurry in print.';
@@ -1228,6 +1380,69 @@
     preview.id = null;
     preview.pyramid = null;
     preview.loading = null;
+    dropFull();
+  }
+
+  function dropFull() {
+    clearTimeout(preview.fullTimer);
+    preview.fullBusy = null;
+    if (preview.full) releasePyramid(preview.full.pyr);
+    preview.full = null;
+    if (el.stageNote) el.stageNote.hidden = true;
+  }
+
+  // Everything that changes the full-size render of one page.
+  function fullKey(item, geo, mode) {
+    return [item.id, mode, effectiveFill(item), solidColor(item), geo.fullW, geo.fullH, geo.blurRadius,
+            JSON.stringify(geo.placed), JSON.stringify(geo.area), JSON.stringify(geo.coverPlaced)].join('|');
+  }
+
+  // A sharpened page costs about a second to build, so the preview first shows
+  // the quick small render and swaps in the real one when it is ready.
+  function scheduleFull(item, key) {
+    if (preview.fullBusy === key) return;
+    clearTimeout(preview.fullTimer);
+    preview.fullBusy = key;
+    el.stageNote.hidden = false;
+    preview.fullTimer = setTimeout(function () {
+      var cur = selectedItem();
+      var stale = !cur || cur.id !== item.id || preview.id !== item.id || !preview.pyramid;
+      var built = null;
+      try {
+        if (!stale) {
+          var st = pageStatus(cur, pageIndexOf(cur), book());
+          if (sharpenPlan(cur, st.geo, st.mode, 1) && fullKey(cur, st.geo, st.mode) === key) {
+            built = newCanvas(st.geo.fullW, st.geo.fullH);
+            renderPage(built.getContext('2d'), cur, preview.pyramid, st.geo, 1, st.mode, 0);
+          }
+        }
+      } catch (e) {
+        releaseCanvas(built);
+        built = null;
+      }
+      preview.fullBusy = null;
+      el.stageNote.hidden = true;
+      if (built) {
+        if (preview.full) releasePyramid(preview.full.pyr);
+        preview.full = { key: key, pyr: [built] };
+      }
+      schedulePreview();
+    }, 60);
+  }
+
+  // Draws the visible part of the cached full-size page into the preview canvas.
+  function drawFromFull(ctx, pyr, vis, cw, ch) {
+    var fw = pyr[0].width;
+    var level = halfStep(pyr, fw * cw / vis.w);
+    var ls = level.width / fw;
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.filter = 'none';
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    smooth(ctx);
+    ctx.drawImage(level, vis.x * ls, 0, vis.w * ls, level.height, 0, 0, cw, ch);
+    ctx.restore();
   }
 
   // Full-size decode of the selected page only — never all pages at once.
@@ -1236,6 +1451,7 @@
     if (preview.loading === item.id) return false;
     releasePyramid(preview.pyramid);
     preview.pyramid = null;
+    dropFull();
     preview.id = item.id;
     preview.loading = item.id;
     decodeUpright(item.file).then(function (canvas) {
@@ -1301,8 +1517,17 @@
     var cw = Math.max(1, Math.round(vis.w * s)), ch = Math.max(1, Math.round(vis.h * s));
     if (el.previewCanvas.width !== cw) el.previewCanvas.width = cw;
     if (el.previewCanvas.height !== ch) el.previewCanvas.height = ch;
-    renderPage(el.previewCanvas.getContext('2d'), item, preview.pyramid, geo, s, st.mode, vis.x);
+    var pctx = el.previewCanvas.getContext('2d');
+    var sharp = sharpenPlan(item, geo, st.mode, 1);
+    var key = sharp ? fullKey(item, geo, st.mode) : null;
+    if (sharp && preview.full && preview.full.key === key) {
+      drawFromFull(pctx, preview.full.pyr, vis, cw, ch);        // exactly what the export contains
+    } else {
+      renderPage(pctx, item, preview.pyramid, geo, s, st.mode, vis.x);
+      if (sharp) scheduleFull(item, key); else dropFull();
+    }
 
+    el.zoomBtn.hidden = false;
     if (!single) drawBefore(availW, availH, dpr);
     drawGuides(geo, s, dispW, st.mode);
     setDivider(state.dividerPct);
@@ -1322,6 +1547,103 @@
     c.style.height = cssH + 'px';
     var ctx = whiteCtx(c);
     drawArtwork(ctx, preview.pyramid, 0, 0, w, h);
+  }
+
+  /* ---- 11b. 100 % VIEW ---- */
+
+  var zoom = { open: false, canvases: [] };
+
+  function zoomCanvas(item, st, plain) {
+    var c = newCanvas(st.geo.fullW, st.geo.fullH);
+    renderPage(c.getContext('2d'), item, preview.pyramid, st.geo, 1, st.mode, 0, plain);
+    return c;
+  }
+
+  // Shows the selected page at print size: one screen pixel is one pixel of
+  // the 300-DPI page. A sharpened page sits next to a plain resize of the same
+  // page, so the difference can be judged where it matters.
+  function openZoom() {
+    var item = selectedItem();
+    if (!item || item.status !== 'ready' || state.trimIndex < 0 || !preview.pyramid || preview.id !== item.id) return;
+    var st = pageStatus(item, pageIndexOf(item), book());
+    var sharp = !!sharpenPlan(item, st.geo, st.mode, 1);
+
+    el.zoomTitle.textContent = 'Page ' + (state.firstPage + pageIndexOf(item)) + ' · ' + item.name;
+    el.zoomHint.textContent = 'Building the page at print size…';
+    el.zoomColA.hidden = !sharp;
+    el.zoomLabelA.textContent = 'Plain resize (not sharpened)';
+    el.zoomLabelB.textContent = sharp ? '✨ Sharpened — what you download'
+      : (st.mode === 'asis' ? 'Used as-is — what you download' : 'What you download');
+    el.zoomPanes.classList.toggle('single', !sharp);
+    el.zoomModal.hidden = false;
+    document.body.classList.add('modal-open');
+    zoom.open = true;
+    el.zoomClose.focus();
+
+    // let the "building" message paint before the (heavy) render starts
+    setTimeout(function () {
+      if (!zoom.open) return;
+      try {
+        var a = sharp ? zoomCanvas(item, st, true) : null;
+        var b = zoomCanvas(item, st, false);
+        mountZoom(el.zoomScrollA, a);
+        mountZoom(el.zoomScrollB, b);
+        el.zoomHint.textContent = 'Real pixels: one screen pixel is one pixel of your 300 DPI page. Drag to look around' +
+          (sharp ? ' — both sides move together.' : '.');
+        var ref = el.zoomScrollB;
+        var dpr = window.devicePixelRatio || 1;
+        var x = Math.max(0, 0.3 * b.width / dpr - ref.clientWidth / 2);
+        var y = Math.max(0, 0.1 * b.height / dpr - ref.clientHeight / 2);
+        [el.zoomScrollA, el.zoomScrollB].forEach(function (sc) { sc.scrollLeft = x; sc.scrollTop = y; });
+      } catch (e) {
+        el.zoomHint.textContent = 'Could not build this page at print size. Please try again.';
+      }
+    }, 60);
+  }
+
+  function mountZoom(host, canvas) {
+    host.innerHTML = '';
+    if (!canvas) return;
+    var dpr = window.devicePixelRatio || 1;
+    canvas.style.width = (canvas.width / dpr) + 'px';
+    canvas.style.height = (canvas.height / dpr) + 'px';
+    host.appendChild(canvas);
+    zoom.canvases.push(canvas);
+  }
+
+  function closeZoom() {
+    if (!zoom.open) return;
+    zoom.open = false;
+    el.zoomModal.hidden = true;
+    document.body.classList.remove('modal-open');
+    el.zoomScrollA.innerHTML = '';
+    el.zoomScrollB.innerHTML = '';
+    zoom.canvases.forEach(releaseCanvas);
+    zoom.canvases = [];
+    el.zoomBtn.focus();
+  }
+
+  // Both panes scroll together; a mouse can also drag the page around.
+  function wireZoomPane(pane, other) {
+    pane.addEventListener('scroll', function () {
+      if (other.scrollLeft !== pane.scrollLeft) other.scrollLeft = pane.scrollLeft;
+      if (other.scrollTop !== pane.scrollTop) other.scrollTop = pane.scrollTop;
+    });
+    var drag = null;
+    pane.addEventListener('pointerdown', function (e) {
+      if (e.pointerType !== 'mouse' || e.button !== 0) return;
+      drag = { x: e.clientX, y: e.clientY, l: pane.scrollLeft, t: pane.scrollTop };
+      pane.setPointerCapture(e.pointerId);
+      pane.classList.add('dragging');
+    });
+    pane.addEventListener('pointermove', function (e) {
+      if (!drag) return;
+      pane.scrollLeft = drag.l - (e.clientX - drag.x);
+      pane.scrollTop = drag.t - (e.clientY - drag.y);
+    });
+    function end() { drag = null; pane.classList.remove('dragging'); }
+    pane.addEventListener('pointerup', end);
+    pane.addEventListener('pointercancel', end);
   }
 
   // Guides live on their own overlay canvas, drawn on top of the preview.
@@ -1433,7 +1755,8 @@
       el.outSub.textContent = '✅ Already the right size — used as-is.';
     } else {
       el.outSub.textContent = '⚠️ Will be resized using your Fit/Fill choice (' +
-        (st.mode === 'fit' ? 'Fit — never crops' : 'Fill — fills the page, may crop') + ').';
+        (st.mode === 'fit' ? 'Fit — never crops' : 'Fill — fills the page, may crop') + ').' +
+        (st.sharp ? ' ✨ Line art: sharpened to 300 DPI in the download (this preview is smaller).' : '');
     }
 
     // Gutter only ever actually applies to pages we place ourselves (Fit/Fill).
@@ -1476,10 +1799,10 @@
     }
     sel.value = item.placement;
 
-    updateQuality(st.mode === 'asis' ? null : st.dpi);
+    updateQuality(st.mode === 'asis' ? null : st.dpi, st.sharp);
   }
 
-  function updateQuality(dpi) {
+  function updateQuality(dpi, sharp) {
     if (dpi === null) {
       el.quality.hidden = false;
       el.quality.className = 'quality q-ok';
@@ -1489,6 +1812,22 @@
     }
     el.quality.hidden = false;
     el.quality.className = 'quality';
+    if (sharp) {
+      if (dpi >= SHARPEN_GOOD_DPI) {
+        el.quality.classList.add('q-ok');
+        el.qTitle.textContent = '✅ Print quality: Good — sharpened';
+        el.qCopy.textContent = 'Your line art has about ' + dpi + ' DPI of real detail. We clean up and sharpen its edges and build the page at 300 DPI, so lines print crisp. Very fine details can’t be added.';
+      } else if (dpi >= SHARPEN_MIN_DPI) {
+        el.quality.classList.add('q-warn');
+        el.qTitle.textContent = '⚠️ Print quality: Sharpened, but small';
+        el.qCopy.textContent = 'Your image only has about ' + dpi + ' DPI of detail. Edges are sharpened, but thin lines and small details may look rounded or blobby. A larger original would look better.';
+      } else {
+        el.quality.classList.add('q-bad');
+        el.qTitle.textContent = '⛔ Print quality: Low';
+        el.qCopy.textContent = 'At ' + dpi + ' DPI there isn’t enough detail for sharpening to rescue fine lines. Try starting from a larger version of your image.';
+      }
+      return;
+    }
     if (dpi >= 300) {
       el.quality.classList.add('q-ok');
       el.qTitle.textContent = '✅ Print quality: Excellent';
@@ -1763,7 +2102,7 @@
     var allMatch = sized && ready.length > 0 && needResize === 0;
 
     setLocked('step2', !sized, [el.chooseBtn]);
-    setLocked('step3', !sized || allMatch, [el.placeFit, el.placeFill, el.fillSelect, el.colorSwatchBtn]);
+    setLocked('step3', !sized || allMatch, [el.placeFit, el.placeFill, el.fillSelect, el.colorSwatchBtn, el.sharpenToggle]);
     setLocked('step4', !sized || allMatch, [el.fmtPng, el.fmtJpg, el.jpegQuality]);
     el.allMatchNote.hidden = !allMatch;
 
@@ -1978,7 +2317,9 @@
      'chooseBtn', 'fileInput', 'uploadSummary', 'uploadSummaryText', 'clearAllBtn',
      'allMatchNote', 'placeFit', 'placeFill', 'placementHint', 'cropSummary',
      'fillSelect', 'fillHint', 'solidColorRow', 'colorSwatchBtn', 'colorSwatchPreview',
-     'colorSwatchLabel', 'colorResetBtn', 'colorFallbackInput',
+     'colorSwatchLabel', 'colorResetBtn', 'colorFallbackInput', 'sharpenToggle',
+     'stageNote', 'zoomBtn', 'zoomModal', 'zoomTitle', 'zoomHint', 'zoomClose', 'zoomPanes',
+     'zoomColA', 'zoomLabelA', 'zoomLabelB', 'zoomScrollA', 'zoomScrollB',
      'fmtPng', 'fmtJpg', 'formatHint', 'qualityField', 'jpegQuality', 'jpegQualityVal',
      'sizeMeter', 'sizeVal', 'sizeFill', 'sizeCopy', 'downloadBtn',
      'content', 'pageTotal', 'reorderHint', 'emptyState', 'emptyHead', 'emptySub', 'pageGrid',
@@ -2087,6 +2428,10 @@
       updateSolidColorRow();
       refresh();
     });
+    el.sharpenToggle.addEventListener('change', function () {
+      state.sharpen = el.sharpenToggle.checked;
+      refresh();
+    });
 
     /* -- step 4: format -- */
     el.fmtPng.addEventListener('click', function () { setFormat('png'); });
@@ -2110,8 +2455,15 @@
     wirePopover('help3', 'pop3');
     document.addEventListener('click', function () { closePopovers(null); });
     document.addEventListener('keydown', function (e) {
-      if (e.key === 'Escape') closePopovers(null);
+      if (e.key === 'Escape') { closePopovers(null); closeZoom(); }
     });
+
+    /* -- 100 % view -- */
+    el.zoomBtn.addEventListener('click', openZoom);
+    el.zoomClose.addEventListener('click', closeZoom);
+    el.zoomModal.addEventListener('click', function (e) { if (e.target === el.zoomModal) closeZoom(); });
+    wireZoomPane(el.zoomScrollA, el.zoomScrollB);
+    wireZoomPane(el.zoomScrollB, el.zoomScrollA);
 
     /* -- preview toolbar -- */
     el.guidesToggle.addEventListener('change', function () {
